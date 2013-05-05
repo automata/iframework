@@ -11,11 +11,15 @@ $(function(){
       '<button class="prev">prev</button>'+
       '<button class="next">next</button>'+
       '<button class="deleteframe">deleteframe</button><br/><br/>'+
-      '<button class="export">export</button>'+
+      '<label><input type="checkbox" class="pingpong" <%= (get("state").pingpong ? "checked" : "") %> />pingpong (loop back and forth)</label><br/><br/>'+
+      '<button class="make-gif">make gif</button>'+
+      '<button class="make-spritesheet">make spritesheet</button>'+
       // '<button class="import">import</button>'+
       // '<form class="importform" style="display:none;">'+
       // '</form>'+
-    '</div>';
+    '</div>'+
+    '<div class="status"></div>'+
+    '<div class="exports"></div>';
 
   Iframework.NativeNodes["variable-animation"] = Iframework.NativeNodes["variable"].extend({
 
@@ -30,7 +34,9 @@ $(function(){
       "click .prev"  : "inputprev",
       "click .next"  : "inputnext",
       "click .deleteframe"  : "deleteFrame",
-      "click .export"  : "exportImage"
+      "change .pingpong": "clickPingpong",
+      "click .make-spritesheet"  : "makeSpritesheet",
+      "click .make-gif"  : "makeGif"
     },
     initializeModule: function(){
       this._animation = {
@@ -43,6 +49,22 @@ $(function(){
       this.canvas = this.$(".preview")[0];
       this.context = this.canvas.getContext('2d');
       this.$("button").button();
+
+
+      // Setup droppable
+      // Add drop indicator (shown in CSS)
+      this.$el.append('<div class="drop-indicator"><p class="icon-login">add image</p></div>');
+      
+      // Make droppable        
+      this.$el.droppable({
+        accept: ".canvas, .meemoo-plugin-images-thumbnail",
+        tolerance: "pointer",
+        hoverClass: "drop-hover",
+        activeClass: "drop-active",
+        // Don't also drop on graph
+        greedy: true
+      });
+      this.$el.on("drop", {"self": this, "inputName": "push"}, Iframework.util.imageDrop);
     },
     inputpush: function(image){
       var frame = document.createElement("canvas");
@@ -123,6 +145,26 @@ $(function(){
         this.showFrame(this._previewFrame);
       }
     },
+    _pingpong: false,
+    _reverse: false,
+    clickPingpong: function(event){
+      if (event.target.checked) {
+        this._pingpong = true;
+        this.set("pingpong", true);
+      } else {
+        this._pingpong = false;
+        this._reverse = false;
+        this.set("pingpong", false);
+      }
+    },
+    inputpingpong: function(boo){
+      this._pingpong = boo;
+      if (!boo) {
+        // Keeps it from looping backwards
+        this._reverse = false;
+      }
+      this.$(".pingpong")[0].checked = boo;
+    },
     _play: false,
     inputplay: function(){
       this._play = true;
@@ -150,7 +192,7 @@ $(function(){
         this.showFrame(0);
       }
     },
-    exportImage: function(){
+    makeSpritesheet: function(){
       if (this._animation.length < 1) { return; }
 
       var image = document.createElement("canvas");
@@ -162,10 +204,49 @@ $(function(){
         imageContext.drawImage(this._animation.frames[i], x, 0);
         x += this._animation.width;
       }
-      try {
-        var url = image.toDataURL();
-        window.open(url);
-      } catch (e) {}
+      var img = '<img src="' + image.toDataURL() + '" style="max-width:100%" />';
+      self.$(".exports").prepend( img );
+    },
+    makeGif: function(){
+      // Spawn worker
+      this.$(".status").text("Setting up GIF...");
+      var gifWorker = new Worker("libs/omggif/omggif-worker.js");
+
+      // Setup listeners
+      var self = this;
+      gifWorker.addEventListener('message', function (e) {
+        if (e.data.type === "progress") {
+          self.$(".status").text("GIF " + e.data.data + "% encoded...");
+        } else if (e.data.type === "gif") {
+          var gifurl = "data:image/gif;base64,"+window.btoa(e.data.data);
+          var img = $('<img />')
+            .attr({
+              src: gifurl,
+              title: e.data.frameCount + " frames encoded in " + e.data.encodeTime + " seconds",
+              style: "max-width:100%"
+            });
+          self.$(".exports").prepend( img );
+          self.$(".status").text("");
+        }
+      }, false);
+      gifWorker.addEventListener('error', function (e) {
+        self.$(".status").text("GIF encoding error :-(");
+      }, false);
+
+      // Send image data
+      var frames = [];
+      for (var i = 0; i<this._animation.length; i++) {
+        var imageData = this._animation.frames[i].getContext('2d').getImageData(0, 0, this._animation.width, this._animation.height);
+        frames[i] = imageData;
+        if (this._pingpong && i>0 && i<this._animation.length-1) {
+          frames[this._animation.length * 2 - 2 - i] = imageData;
+        }
+      }
+      gifWorker.postMessage({
+        frames: frames,
+        delay: this._ms
+      });
+
     },
     inputsend: function(){
       this.send("animation", this._animation);
@@ -174,10 +255,28 @@ $(function(){
     },
     renderAnimationFrame: function (timestamp) {
       if (this._play && timestamp-this._lastRedraw>=this._ms) {
-        this._previewFrame++;
-        if (this._previewFrame >= this._animation.frames.length) {
-          // Loop
-          this._previewFrame = 0;
+        if (this._reverse) {
+          this._previewFrame--;
+          if (this._previewFrame < 0) {
+            // Loop
+            if (this._pingpong) {
+              this._reverse = false;
+              this._previewFrame = 1;
+            } else {
+              this._previewFrame = this._animation.frames.length - 1;
+            }
+          }
+        } else {
+          this._previewFrame++;
+          if (this._previewFrame >= this._animation.frames.length) {
+            // Loop
+            if (this._pingpong) {
+              this._reverse = true;
+              this._previewFrame = Math.max(this._animation.frames.length - 2, 0);
+            } else {
+              this._previewFrame = 0;
+            }
+          }
         }
         this.showFrame(this._previewFrame);
 
@@ -197,6 +296,11 @@ $(function(){
         type: "float",
         description: "frames per second to animate",
         "default": 12
+      },
+      pingpong: {
+        type: "boolean",
+        description: "loop animation back and forth",
+        "default": false
       },
       play: {
         type: "bang",
